@@ -167,37 +167,67 @@ INSERT INTO Wallets (patient_id, balance, status) VALUES
 (2, 50000.00, 'Active'),     -- Test Case 3: Cháy ví (Chỉ có 50k, không đủ khám 200k)
 (3, 1000000.00, 'Inactive'); -- Test Case 2: Nhiều tiền nhưng thẻ bị khóa
 
+	
 delimiter //
-
-create trigger PreventPastAppointments
-before update on Appointments
-for each row
-begin
-	if old.appointment.date < now() then
-		signal sqlstate '45000'
-		set message_text = 'Lỗi : Không thể đặt lịch khám vào thời điểm trong quá khứ';
-	end if;
+create procedure PayHospitalFee (
+	in p_patient_id int,
+    in p_amount decimal(18,2)
+)
+begin 
+	update Wallets 
+    set balance = balance - p_amount 
+    where patient_id = p_patient_id;
+    
+    signal sqlstate '45000'
+    set message_text = 'Lỗi : Hệ thống gặp sự cố mạng đột ngột';
+    
+    update Patient_Involces 
+    set total_due = total_due - p_amount
+    where patient_id = p_patient_id;
 end //
-
 delimiter ;
 
--- OLD.appointment_date là giá trị ngày khám đang có trong database trước khi cập nhật
--- Còn NEW.appointment_date là giá trị ngày khám mới mà tiếp tân vừa nhập vào từ phần mềm.
--- Đoạn mã cũ kiểm tra OLD.appointment_date < NOW(). Điều này vô nghĩa vì nó đi kiểm tra xem lịch cũ có phải ở quá khứ không, trong khi mục tiêu của chúng ta là phải chặn giá trị mới (NEW) nếu người dùng lỡ tay chọn ngày về quá khứ.
+call PayHospitalFee(1,50);
 
-drop trigger PreventPastAppointments;
+select * from wallets;
+select * from Patient_Invoices;
 
-delimiter //
+-- Sự cố vi phạm đặc tính Automicity :
+-- Thao tác chỉ thực hiện được một nửa rồi dừng lại, dẫn đến sai lệch dữ liệu.
 
-create trigger PreventPastAppointments
-before update on Appointments
-for each row
-begin
-	if new.appointment.date < now() then
-		signal sqlstate '45000'
-		set message_text = 'Lỗi : Không thể đặt lịch khám vào thời điểm trong quá khứ';
-	end if;
-end //
+drop procedure PayHospitalFee;
 
-delimiter ;
+DROP PROCEDURE IF EXISTS PayHospitalFee;
+DELIMITER //
+
+CREATE PROCEDURE PayHospitalFee (
+    IN p_patient_id INT,
+    IN p_amount DECIMAL(18,2)
+)
+BEGIN
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL SET MESSAGE_TEXT = 'Giao dịch thất bại: Đã hoàn tác mọi thay đổi do sự cố mạng.';
+    END;
+
+    START TRANSACTION;
+        
+        UPDATE Wallets 
+        SET balance = balance - p_amount 
+        WHERE patient_id = p_patient_id;
+        
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Lỗi: Hệ thống gặp sự cố mạng đột ngột!';
+        
+        UPDATE Patient_Invoices 
+        SET total_due = total_due - p_amount
+        WHERE patient_id = p_patient_id;
+        
+    COMMIT;
+END //
+
+DELIMITER ;
+
+call PayHospitalFee(1,50);
 
